@@ -1,0 +1,11 @@
+.env
+__pycache__/
+.venv/
+templates/
+bot_learn.py
+output.md
+practice.py
+sending_audio.py
+testing_pipeline.py
+*.mp3
+

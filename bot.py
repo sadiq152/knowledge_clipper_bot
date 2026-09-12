@@ -4,6 +4,7 @@ import threading
 import sqlite3
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
@@ -18,24 +19,77 @@ from telegram.ext import (
 from fethers import probe_content_type, fetch_video, fetch_caption_text, fetch_carousel_images
 from app import analyse_video, analyse_images, analyse_url_with_search
 
+load_dotenv()
+
+DB_PATH = "bot_logs.db"
+LOGS_SECRET = os.environ.get("LOGS_SECRET", "")
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        parsed = urlparse(self.path)
+
+        if parsed.path == "/logs":
+            self._serve_logs(parsed)
+            return
+
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"Bot is live")
+
+    def _serve_logs(self, parsed):
+        query = parse_qs(parsed.query)
+        provided_key = query.get("key", [""])[0]
+
+        if not LOGS_SECRET or provided_key != LOGS_SECRET:
+            self.send_response(403)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"Forbidden - missing or wrong ?key=... value")
+            return
+
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT user_id, username, first_name, message_text, "
+                "bot_response, status, timestamp FROM interactions "
+                "ORDER BY timestamp DESC LIMIT 100"
+            ).fetchall()
+            conn.close()
+        except Exception as e:
+            self.send_response(500)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(f"Error reading logs: {e}".encode("utf-8"))
+            return
+
+        lines = [f"Last {len(rows)} interactions (newest first):", "=" * 60]
+        for row in rows:
+            lines.append(
+                f"[{row['timestamp']}] {row['first_name']} "
+                f"(@{row['username']}, id={row['user_id']}) - status: {row['status']}\n"
+                f"  Sent: {row['message_text'][:200]}\n"
+                f"  Got:  {(row['bot_response'] or '')[:200]}\n"
+            )
+        body = "\n".join(lines).encode("utf-8")
+
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(body)
+
 
 def run_web():
     server = HTTPServer(("0.0.0.0", 8000), Handler)
     server.serve_forever()
 
 threading.Thread(target=run_web, daemon=True).start()
-load_dotenv()
+
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
 if not BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN not set - check your .env file")
 
-DB_PATH = "bot_logs.db"
 
 def init_db():
     """Creates the interactions table if it doesn't exist yet. Safe to call

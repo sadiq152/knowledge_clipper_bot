@@ -1,6 +1,8 @@
 import os
 import re
 import threading
+import sqlite3
+from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
 from telegram import Update
@@ -32,6 +34,57 @@ BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
 if not BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN not set - check your .env file")
+
+DB_PATH = "bot_logs.db"
+
+def init_db():
+    """Creates the interactions table if it doesn't exist yet. Safe to call
+    every time the bot starts - CREATE TABLE IF NOT EXISTS is a no-op if
+    the table is already there."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS interactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            first_name TEXT,
+            message_text TEXT,
+            bot_response TEXT,
+            status TEXT,
+            timestamp TEXT NOT NULL
+            )
+    """)
+    conn.commit()
+    conn.close()
+
+def log_interaction(update: Update, message_text: str, bot_response: str, status: str = "ok"):
+    """Records one message-in / response-out pair. Called from both /start
+    and handle_message so every touch with the bot gets logged, not just
+    successful link analyses. Never raises - a logging failure should
+    never break the bot's actual reply to the user."""
+    try:
+        user = update.effective_user
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            """INSERT INTO interactions
+               (user_id, username, first_name, message_text, bot_response, status, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (
+                   user.id,
+                   user.username,
+                   user.first_name,
+                   message_text,
+                   bot_response,
+                   status,
+                   datetime.now(timezone.utc).isoformat(),
+               ),
+
+        )
+        conn.commit()
+        conn.close()
+
+    except Exception as e:
+        print("Failed to log interaction:", e)
 def sanitize(text) -> str:
     if text is None:
         return ""
@@ -173,6 +226,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "I'll break them down into actionable steps and code snippets!"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
+    log_interaction(update, "/start", welcome_text)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -226,15 +280,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply = format_bot_response(data)
         try:
             await status_msg.edit_text(reply, parse_mode="Markdown")
+            log_interaction(update, text, reply, status="ok")
         except Exception as parse_err:
-            await status_msg.edit_text(f"⚠️ Formatting error, showing raw text:\n\n{reply}"
-            )
+            fallback_error = f"⚠️ Formatting error, showing raw text:\n\n{reply}"
+            await status_msg.edit_text(fallback_error)
+            log_interaction(update, text, fallback_error, status="Markdown_parse_error")
             print("Markdown parse error:", parse_err)
     except Exception as e:
-        await status_msg.edit_text(f"❌ Failed to process: {str(e)}")
+        error_reply = f"❌ Failed to process: {str(e)}"
+        await status_msg.edit_text(error_reply)
+        log_interaction(update, text, error_reply, status="error")
 
 
 if __name__ == "__main__":
+    init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

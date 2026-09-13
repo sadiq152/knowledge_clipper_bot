@@ -8,6 +8,7 @@ try:
 except ImportError:
     instaloader = None  # only needed for the carousel path
 
+YT_EXTRACTOR_ARGS = {"youtube": {"player_client": ["tv", "web_safari"]}}
 
 def probe_content_type(url: str) -> str:
     """Classify a URL as 'video' or 'carousel' before downloading anything.
@@ -20,7 +21,10 @@ def probe_content_type(url: str) -> str:
     multi-image carousels and instaloader is a better tool for that.
     """
     if "instagram.com/p/" in url and "/reel/" not in url:
-        ydl_opts = {"quiet": True, "skip_download": True}
+        ydl_opts = {"quiet": True,
+                    "skip_download": True,
+                    "extractor_args": YT_EXTRACTOR_ARGS,
+                    }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -44,6 +48,8 @@ def fetch_video(url: str) -> str:
         "format": "mp4/best[ext=mp4]/best",
         "quiet": True,
         "merge_output_format": "mp4",
+        "extractor_args": YT_EXTRACTOR_ARGS,
+
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -62,7 +68,10 @@ def fetch_caption_text(url: str) -> str:
     creators use for 'these are the 5 habits...' style content with no
     useful speech (background music + a caption doing all the work).
     """
-    ydl_opts = {"quiet": True, "skip_download": True}
+    ydl_opts = {"quiet": True,
+                "skip_download": True,
+                "extractor_args": YT_EXTRACTOR_ARGS,
+                }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
     return (info.get("description") or "").strip()
@@ -121,7 +130,8 @@ def fetch_instagram_audio(url: str) -> str:
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
-            "extractor_args": {"youtube": {"player_client": ["tv", "web_safari"]}},
+            "extractor_args": YT_EXTRACTOR_ARGS,
+
         }],
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:

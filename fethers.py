@@ -121,6 +121,7 @@ def fetch_instagram_audio(url: str) -> str:
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
+            "extractor_args": {"youtube": {"player_client": ["tv", "web_safari"]}},
         }],
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:

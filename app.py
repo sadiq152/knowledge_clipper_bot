@@ -273,55 +273,6 @@ def find_tutorial_links(project_name: str, tools: list[str]) -> list[dict]:
         "channel": "",
         "url": f"https://www.youtube.com/results?search_query={fallback_query}",
     }]
-def analyse_reel(audio_path: str) -> dict:
-    prompt = f"""
-    You are analyzing the audio track of a short-form video (Reel/Short).
-    {_CATEGORY_INSTRUCTIONS}
-
-    For "learning" content, for any takeaway that is a specific project or
-    hobby to build, fill in project_guide with a clear frontend/backend tool
-    split. If the intended learner is a beginner, beginner_roadmap must
-    avoid naming multiple competing languages or frameworks — commit to one
-    simple path, and explain it like the person has never coded before.
-    Do not fill project_guide for takeaways that are just general advice or
-    concepts, not projects.
-
-    IMPORTANT: for "learning" content, project_guide is decided PER
-    TAKEAWAY, independently of the video-level is_project_or_hobby field. If
-    a video lists several projects (e.g. "build an expense tracker", "build
-    a notes app", "build a weather app"), each of those takeaways is its own
-    project and MUST get its own project_guide filled in — even though
-    you've already answered is_project_or_hobby/project_summary once for the
-    video as a whole. Do not leave a takeaway's project_guide null just
-    because you already described the video at the top level.
-
-    If the audio doesn't contain enough information for a field, leave it
-    empty rather than inventing details.
-    """
-
-    with open(audio_path, 'rb') as f:
-        audio_file = f.read()
-
-    audio_part = types.Part.from_bytes(data=audio_file, mime_type='audio/mp3')
-
-    response = client.models.generate_content(
-        model="gemini-3.5-flash-lite",
-        contents=[prompt, audio_part],
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=VideoAnalysisResult,
-            temperature=0.2,
-        ),
-    )
-    data = json.loads(response.text)
-    for item in data.get("takeaways", []):
-        guide = item.get("project_guide")
-        if guide:
-            tools = guide.get("frontend_stack", []) + guide.get("backend_stack", [])
-            guide["tutorial_links"] = find_tutorial_links(item.get("headline", ""), tools)
-
-    return data
-
 
 def _enrich_with_tutorial_links(data: dict) -> dict:
     """Shared post-processing: attach real tutorial_links to every takeaway
@@ -443,7 +394,7 @@ def analyse_images(image_paths: list[str], caption_text: str = "") -> dict:
         parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.5-flash-lite",
         contents=parts,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",

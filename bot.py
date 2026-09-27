@@ -2,6 +2,7 @@ import os
 import re
 import threading
 import sqlite3
+import shutil
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -310,9 +311,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await status_msg.edit_text("🧠 Analyzing slides with Gemini...")
                 data = analyse_images(image_paths, caption_text)
 
-                for path in image_paths:
-                    if os.path.exists(path):
-                        os.remove(path)
+                shutil.rmtree(os.path.dirname(image_paths[0]), ignore_errors=True)
             else:
                 # Route 2: Reel / Short -> real video (frames + audio) -> Gemini multimodal
                 await status_msg.edit_text("🎬 Downloading video...")
@@ -332,7 +331,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Format and return result
         reply = format_bot_response(data)
-        try:
+        try: 
             await status_msg.edit_text(reply, parse_mode="Markdown")
             log_interaction(update, text, reply, status="ok")
         except Exception as parse_err:
@@ -341,8 +340,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log_interaction(update, text, fallback_error, status="Markdown_parse_error")
             print("Markdown parse error:", parse_err)
     except Exception as e:
-        error_reply = f"❌ Failed to process: {str(e)}"
-        await status_msg.edit_text(error_reply)
+        import traceback
+        tb = traceback.format_exc()
+        print(tb)
+        last = tb.strip().splitlines()[-3:]
+        error_reply = "❌ Failed to process: " + str(e) + "\n\n" + "\n".join(last)
+        await status_msg.edit_text(error_reply[:4000])
         log_interaction(update, text, error_reply, status="error")
 
 

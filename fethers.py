@@ -2,13 +2,53 @@ import os
 import glob
 import tempfile
 import yt_dlp
-
+import requests
+import re
+import pickle
 try:
     import instaloader
 except ImportError:
     instaloader = None  # only needed for the carousel path
 
-YT_EXTRACTOR_ARGS = {"youtube": {"player_client": ["tv", "web_safari"]}}
+YT_EXTRACTOR_ARGS = {"youtube": {"player_client": ["tv", "web_safari", "ios", "android"]}}
+
+_IG_COOKIE_PATH = None
+
+def _instagram_cookiefile():
+    """Builds a Netscape-format cookies file for yt-dlp from the instaloader
+    session file, so yt-dlp can fetch Instagram posts that need a login.
+    Returns None if no usable session exists.
+    """
+    global _IG_COOKIE_PATH
+    if _IG_COOKIE_PATH and os.path.exists(_IG_COOKIE_PATH):
+        return _IG_COOKIE_PATH
+
+    session_file = os.environ.get("INSTALOADER_SESSION_FILE")
+    if not session_file or not os.path.exists(session_file):
+        return None
+    try:
+        with open(session_file, "rb") as f:
+            cookies = pickle.load(f)
+    except Exception:
+        return None
+    if not isinstance(cookies, dict) or not cookies.get("sessionid"):
+        return None
+
+    fd, path = tempfile.mkstemp(prefix="igcookies_", suffix=".txt")
+    with os.fdopen(fd, "w") as f:
+        f.write("# Netscape HTTP Cookie File\n")
+        for name, value in cookies.items():
+            f.write(f".instagram.com\tTRUE\t/\tTRUE\t2147483647\t{name}\t{value}\n")
+    _IG_COOKIE_PATH = path
+    return path
+
+def _base_opts(url: str) -> dict:
+    opts = {"quiet": True,}
+    if "instagram.com" in url:
+        cookiefile = _instagram_cookiefile()
+        if cookiefile:
+            opts["cookiefile"] = cookiefile
+    return opts
 
 def probe_content_type(url: str) -> str:
     """Classify a URL as 'video' or 'carousel' before downloading anything.
@@ -21,9 +61,8 @@ def probe_content_type(url: str) -> str:
     multi-image carousels and instaloader is a better tool for that.
     """
     if "instagram.com/p/" in url and "/reel/" not in url:
-        ydl_opts = {"quiet": True,
+        ydl_opts = {**_base_opts(url),
                     "skip_download": True,
-                    "extractor_args": YT_EXTRACTOR_ARGS,
                     }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -44,11 +83,10 @@ def fetch_video(url: str) -> str:
     tmp_dir = tempfile.mkdtemp(prefix="video_")
     out_template = os.path.join(tmp_dir, "%(id)s.%(ext)s")
     ydl_opts = {
+        **_base_opts(url),
         "outtmpl": out_template,
         "format": "mp4/best[ext=mp4]/best",
-        "quiet": True,
         "merge_output_format": "mp4",
-        "extractor_args": YT_EXTRACTOR_ARGS,
 
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -68,38 +106,31 @@ def fetch_caption_text(url: str) -> str:
     creators use for 'these are the 5 habits...' style content with no
     useful speech (background music + a caption doing all the work).
     """
-    ydl_opts = {"quiet": True,
-                "skip_download": True,
-                "extractor_args": YT_EXTRACTOR_ARGS,
-                }
+    ydl_opts = {
+        **_base_opts(url),
+        "skip_download": True,
+    }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
     return (info.get("description") or "").strip()
 
-
 def fetch_carousel_images(url: str) -> tuple[list[str], str]:
-    """Downloads every slide of an Instagram carousel post plus its caption.
+    """Downloads every slide of an Instagram post plus its caption.
     Returns (list_of_image_paths_in_slide_order, caption_text).
-
-    NOTE: anonymous Instagram scraping gets rate-limited/blocked fast — the
-    same problem you already hit with Reddit. This is far more reliable
-    with a logged-in session: log in once locally with
-    `instaloader.Instaloader().login(user, pass)` then
-    `.save_session_to_file(path)`, and point INSTALOADER_SESSION_FILE /
-    INSTALOADER_USERNAME env vars at that saved session. Without a session
-    this will work sometimes and get blocked other times.
     """
     if instaloader is None:
         raise RuntimeError("instaloader is not installed — run: pip install instaloader")
 
-    tmp_dir = tempfile.mkdtemp(prefix="carousel_")
+    m = re.search(r"instagram\.com/(?:[\w.]+/)?(?:p|reel|tv)/([A-Za-z0-9_-]+)", url)
+    if not m:
+        raise ValueError(f"Could not extract Instagram shortcode from: {url}")
+    shortcode = m.group(1)
+
     loader = instaloader.Instaloader(
-        dirname_pattern=tmp_dir,
+        quiet=True,
         download_videos=False,
-        download_video_thumbnails=False,
         save_metadata=False,
         post_metadata_txt_pattern="",
-        quiet=True,
     )
 
     session_file = os.environ.get("INSTALOADER_SESSION_FILE")
@@ -107,43 +138,27 @@ def fetch_carousel_images(url: str) -> tuple[list[str], str]:
     if session_file and ig_user and os.path.exists(session_file):
         loader.load_session_from_file(ig_user, session_file)
 
-    shortcode = url.rstrip("/").split("/")[-1]
     post = instaloader.Post.from_shortcode(loader.context, shortcode)
-    loader.download_post(post, target=tmp_dir)
 
-    image_paths = sorted(glob.glob(os.path.join(tmp_dir, "*.jpg")))
-    caption_text = post.caption or ""
-    return image_paths, caption_text
+    # Read slide URLs straight from the post data instead of using
+    # download_post(), which has a fragile logged-in code path.
+    if post.typename == "GraphSidecar":
+        edges = post._field("edge_sidecar_to_children", "edges")
+        urls = [e["node"]["display_url"] for e in edges]
+    else:
+        urls = [post.url]
+    urls = [u for u in urls if u]
+    if not urls:
+        raise RuntimeError("No slide images found in this post")
 
+    tmp_dir = tempfile.mkdtemp(prefix="carousel_")
+    image_paths = []
+    for i, img_url in enumerate(urls, start=1):
+        resp = requests.get(img_url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        path = os.path.join(tmp_dir, f"slide_{i:02d}.jpg")
+        with open(path, "wb") as f:
+            f.write(resp.content)
+        image_paths.append(path)
 
-def fetch_instagram_audio(url: str) -> str:
-    """Kept for backward compatibility / as an audio-only fallback if a full
-    video download ever fails. Prefer fetch_video() for new code — it gives
-    Gemini frames as well as audio.
-    """
-    tmp_dir = tempfile.mkdtemp(prefix="audio_")
-    out_template = os.path.join(tmp_dir, "%(id)s.%(ext)s")
-    ydl_opts = {
-        "outtmpl": out_template,
-        "format": "bestaudio/best",
-        "quiet": True,
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "extractor_args": YT_EXTRACTOR_ARGS,
-
-        }],
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        path = ydl.prepare_filename(info)
-        base, _ = os.path.splitext(path)
-        mp3_path = base + ".mp3"
-        if os.path.exists(mp3_path):
-            return mp3_path
-        if os.path.exists(path):
-            return path
-    candidates = glob.glob(os.path.join(tmp_dir, "*"))
-    if not candidates:
-        raise FileNotFoundError(f"yt_dlp reported success but no file found in {tmp_dir}")
-    return candidates[0]
+    return image_paths, post.caption or ""
